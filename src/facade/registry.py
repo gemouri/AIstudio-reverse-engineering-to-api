@@ -180,7 +180,10 @@ class Account:
         self.pro = pro
         self.daily_budget = daily_budget   # quota Pro/day (67/50 observed → 50)
         _u = u_prefix.strip('/').replace('/', '_')
-        self.ledger_path = LEDGER_DIR / (f"quota_ledger_{_u}.json" if _u else "quota_ledger.json")
+        # B2-fix (13/09): runtime ledger file riêng + merge-preserve —
+        # schema drift an toàn (không mất key lạ ai đó ghi vào cùng file)
+        self.ledger_path = LEDGER_DIR / (f"quota_runtime_{_u}.json" if _u
+                                        else "quota_runtime.json")
         self._load()
 
     def _load(self):
@@ -196,10 +199,17 @@ class Account:
         self.per_model = {}
 
     def save(self):
-        self.ledger_path.write_text(json.dumps({
+        # B2-fix: merge-preserve — đọc file cũ, update keys của mình, GIỮ keys lạ
+        base: dict = {}
+        try:
+            base = json.loads(self.ledger_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        base.update({
             "account": f"{self.u} ({self.email})", "day": time.strftime("%Y-%m-%d"),
             "spend": self.spend, "per_model": self.per_model,
-        }, indent=1), encoding="utf-8")
+        })
+        self.ledger_path.write_text(json.dumps(base, indent=1), encoding="utf-8")
 
     def record(self, model_id: str, cost: int = 1, ok: bool = True, note: str = ""):
         """cost: 1 request = 1 quota unit pro/premium; free tier = 0."""

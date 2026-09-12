@@ -46,6 +46,7 @@ HOOK = r"""
   window.__asrHooked = 1;
   window.__swap = {model: null, temperature: null, tools: null, system: null, contents: null};
   window.__iswap = {model: null};
+  window.__vswap = {model: null};
   const PATCH = (bodyStr, url) => {
     try {
       // Interactions API (omni/deep-research): model ở p[3][17][0] (12/09 verified)
@@ -53,6 +54,13 @@ HOOK = r"""
         const q = JSON.parse(bodyStr);
         const isw = window.__iswap || {};
         if (isw.model && q[3] && q[3][17]) q[3][17][0] = isw.model;
+        return JSON.stringify(q);
+      }
+      // Veo GenerateVideo (13/09): model ở p[0], prompt p[1] — swap model only
+      if (/GenerateVideo/.test(url)) {
+        const q = JSON.parse(bodyStr);
+        const vsw = window.__vswap || {};
+        if (vsw.model && Array.isArray(q) && typeof q[0] === 'string') q[0] = vsw.model;
         return JSON.stringify(q);
       }
       if (!/GenerateContent|GenerateTitle/.test(url)) return bodyStr;
@@ -100,6 +108,76 @@ HOOK = r"""
 
 class CDPError(RuntimeError):
     pass
+
+
+def _split_webchannel_frames(body: str) -> list:
+    """Tách WebChannel body "<len>\\n[[k,payload]]" thành list payload JSON."""
+    frames, i, n = [], 0, len(body)
+    while i < n:
+        j = body.find("\n", i)
+        if j < 0:
+            break
+        try:
+            ln = int(body[i:j])
+        except ValueError:
+            i = j + 1          # không phải len-prefix — bỏ dòng
+            continue
+        frames.append(body[j + 1:j + 1 + ln])
+        i = j + 1 + ln
+    return frames
+
+
+def _live_decode(bodies: list, user_text: str) -> tuple[str, list]:
+    """Decode WebChannel long-poll bodies → (model_text, [pcm_b64_total]).
+
+    Frame format chuẩn: "<len>\\n[[k,payload]]" lặp. Parse len-prefix (KHÔNG
+    regex toàn body — từng frame là JSON độc lập):
+      - PCM: mọi cặp [mime, b64] mime.startswith("audio/") — decode TỪNG
+        frame rồi concat raw bytes (padding b64 ở giữa chuỗi concat = garbage,
+        bug 13/09: 197KB b64 → 2 bytes) → re-encode 1 chuỗi b64 duy nhất.
+      - Text: strings từ frames, lọc noise: 'noop' heartbeat, user-echo,
+        numeric-only. Live voice-only reply → text rỗng (đúng — corpus
+        cap_live_full_audio.json: model trả audio, không text).
+    """
+    import base64
+    raw_pcm = bytearray()
+    texts: list[str] = []
+    for body in bodies:
+        for frame in _split_webchannel_frames(body):
+            try:
+                fj = json.loads(frame)
+            except Exception:
+                continue
+            stack = [fj]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, list):
+                    if (len(node) >= 2 and isinstance(node[0], str)
+                            and node[0].startswith("audio/")
+                            and isinstance(node[1], str)):
+                        try:
+                            raw_pcm += base64.b64decode(node[1])
+                        except Exception:
+                            pass
+                        continue
+                    stack.extend(node)
+                elif isinstance(node, str) and len(node) >= 3:
+                    texts.append(node)
+    u_echo = (user_text or "").strip()
+    import re as _re
+    _uuid = _re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+    _hexish = _re.compile(r"^[A-Za-z0-9_-]{16,}$")   # session-id / b64 token
+    keep = []
+    for t in texts:
+        s = t.strip()
+        if (not s or s == "noop" or s.lower() == u_echo.lower()
+                or s.replace(" ", "").isdigit()
+                or _uuid.match(s) or _hexish.match(s) or s.upper() == "AUDIO"):
+            continue
+        if s not in keep:
+            keep.append(s)
+    pcm_b64 = [base64.b64encode(bytes(raw_pcm)).decode()] if raw_pcm else []
+    return "\n".join(keep), pcm_b64
 
 
 class Driver:
@@ -457,6 +535,9 @@ class Driver:
             raise CDPError(f"interaction trigger failed: {trig}")
 
         # capture CreateInteractionStream events
+        # 13/09 RPC DRIFT: UI Agents tab giờ tách CreateInteraction + 
+        # GetInteractionStream (2 requests riêng); bản cũ = CreateInteractionStream
+        # 1 request. Watch cả 2 — "CreateInteraction" match cả substring cũ.
         events = []
 
         def on_evt(r):
@@ -464,8 +545,8 @@ class Driver:
             if m == "Network.requestWillBeSent":
                 u = p.get("request", {}).get("url", "")
                 pd = p["request"].get("postData") or ""
-                if "CreateInteractionStream" in u:
-                    events.append({"id": p["requestId"], "postData": pd})
+                if "CreateInteraction" in u or "GetInteractionStream" in u:
+                    events.append({"id": p["requestId"], "url": u, "postData": pd})
             elif m == "Network.loadingFinished":
                 for e in events:
                     if e["id"] == p.get("requestId"):
@@ -522,6 +603,298 @@ class Driver:
             except Exception:
                 pass
         return {"raw": "".join(bodies), "request_count": len(events), "ours": ours}
+
+    # ------------------------------------------------------------------
+    # 13/09 B3: Live API (bidiGenerateContent) — WebChannel long-poll (§14.6)
+    # REVERSED 12/09: handshake count=0 → setup count=1 → text-send →
+    # response long-poll "<len>\n[[k,payload]]"; frame 5 = PCM 24kHz b64.
+    # Trap: text chỉ được process khi session ACTIVE (sau Talk) — §14.6.
+    # ------------------------------------------------------------------
+    def live_session(self, text: str, model: str, timeout_s: int = 120) -> dict:
+        self._connect()
+        self._ensure_hook()
+
+        # 13/09 KHÔNG grant mic — grant audioCapture tự bật mic stream, spam
+        # bidi upload channel (500+ UUID frames) và clobber text submit.
+        # Corpus 12/09 capture OK không cần grant (permission đã persist).
+        # Text-only prompt: mic không cần.
+
+        base = aistudio_url_for(getattr(self, "_page_url", None))
+        live_url = base.replace("/prompts/new_chat", "/live")
+        sep = "&" if "?" in live_url else "?"
+        self._send("Page.navigate",
+                   {"url": f"{live_url}{sep}model={model.replace('models/', '', 1)}"})
+
+        # 13/09 fix: Live UI KHÔNG có textarea lúc idle — chờ nút Talk xuất hiện
+        # (aria-label 'Talk' — dump 13/09: btns gồm Talk/Share Screen/Microphone)
+        deadline = time.time() + 30
+        talk_found = False
+        while time.time() < deadline:
+            time.sleep(2)
+            talk_found = self._ev("""(() => [...document.querySelectorAll('button')].some(b =>
+              b.offsetParent && (b.getAttribute('aria-label')||'').trim() === 'Talk'))()""")
+            if talk_found:
+                break
+        if not talk_found:
+            raise CDPError("live UI never loaded (Talk button missing — model locked?)")
+
+        # ---- arm capture TRƯỚC Talk (13/09 root-cause) ----
+        # WebChannel handshake (count=0) + setup (count=1&ofs=0) fire ngay khi
+        # Talk click — arm muộn = mất text-send POST → model không nhận prompt.
+        # Mic uploads spam UUID frames (~89B, 5+/s) khi session active — filter
+        # qua settle logic PCM (không đếm activity tổng).
+        bidi: dict = {}
+        bodies: list[str] = []
+        state = {"last_pcm": 0.0, "got_pcm": False}
+
+        def on_evt(r):
+            m, p = r.get("method", ""), r.get("params", {}) or {}
+            if m == "Network.requestWillBeSent":
+                u = p.get("request", {}).get("url", "")
+                if "bidiGenerateContent" in u:
+                    bidi[p["requestId"]] = {"url": u, "done": False}
+            elif m == "Network.loadingFinished":
+                e = bidi.get(p.get("requestId"))
+                if e is not None:
+                    e["done"] = True
+
+        self._on_event = on_evt
+
+        # ---- Talk → copyright-agree ×4 → session active (flow §14.6) ----
+        talk = self._ev("""(() => {
+          const b = [...document.querySelectorAll('button')].find(b => b.offsetParent &&
+            /talk|start/i.test((b.getAttribute('aria-label')||'') + (b.textContent||'')));
+          if (!b) return 'no-talk-btn';
+          b.click(); return 'talk-clicked';
+        })()""")
+        if talk != "talk-clicked":
+            raise CDPError(f"live trigger failed: {talk}")
+
+        for _ in range(4):   # copyright dialog lặp ×4 (observed)
+            r = self._ev("""(() => {
+              const b = [...document.querySelectorAll('button')].find(b => b.offsetParent &&
+                /agree/i.test((b.getAttribute('aria-label')||'') + (b.textContent||'')));
+              if (b) { b.click(); return 'agreed'; } return 'none';
+            })()""")
+            if r != "agreed":
+                break
+            time.sleep(1.5)
+
+        active = False
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            time.sleep(2)
+            active = self._ev("""(() => [...document.querySelectorAll('button')].some(b =>
+              b.offsetParent && /stop|disconnect/i.test((b.getAttribute('aria-label')||'') +
+                (b.textContent||''))))()""")
+            if active:
+                break
+        if not active:
+            raise CDPError("live session never became active (copyright dialog not cleared?)")
+
+        # ---- type + submit (chỉ process khi active — trap §14.6) ----
+        # 13/09: Live UI submit = nút Run (Ctrl+Return) — Enter thường chỉ
+        # insert newline. Ưu tiên Run button, fallback Send, cuối cùng Ctrl+Enter.
+        msg = json.dumps(text)
+        trig = self._ev(f"""(async () => {{
+          const ta = document.querySelector('textarea');
+          if (!ta) return 'no-input';
+          ta.focus();
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          setter.call(ta, {msg});
+          ta.dispatchEvent(new Event('input', {{bubbles: true}}));
+          await new Promise(r => setTimeout(r, 600));
+          const run = [...document.querySelectorAll('button')]
+            .find(b => b.offsetParent && !b.disabled &&
+              (b.textContent||'').trim().toLowerCase().startsWith('run'));
+          if (run) {{ run.click(); return 'run-clicked'; }}
+          const send = [...document.querySelectorAll('button')]
+            .find(b => b.offsetParent && !b.disabled &&
+              /send/i.test((b.getAttribute('aria-label')||'') + (b.textContent||'')));
+          if (send) {{ send.click(); return 'sent'; }}
+          ta.dispatchEvent(new KeyboardEvent('keydown',
+            {{key:'Enter', code:'Enter', ctrlKey:true, keyCode:13, bubbles:true}}));
+          return 'ctrl-enter-fallback';
+        }})()""")
+        if trig not in ("run-clicked", "sent", "ctrl-enter-fallback"):
+            raise CDPError(f"live text trigger failed: {trig}")
+
+        # ---- capture loop (đã arm trước Talk — chỉ pump + settle) ----
+        deadline = time.time() + timeout_s
+        try:
+            while time.time() < deadline:
+                self.ws.settimeout(3)
+                try:
+                    on_evt(json.loads(self.ws.recv()))
+                except websocket.WebSocketTimeoutException:
+                    pass
+                # fetch body ngay khi request xong (long-poll giữ frame stream);
+                # snapshot list() — on_evt có thể thêm entry mới giữa chừng
+                for rid, e in list(bidi.items()):
+                    if e["done"] and not e.get("fetched"):
+                        e["fetched"] = True
+                        try:
+                            b = self._send("Network.getResponseBody", {"requestId": rid})
+                            body = b.get("body") or ""
+                            e["body"] = body
+                            bodies.append(body)
+                            if "audio/pcm" in body:
+                                state["got_pcm"] = True
+                                state["last_pcm"] = time.time()
+                        except Exception:
+                            e["body"] = ""
+                # settle: model audio bắt đầu chảy + 5s không PCM mới
+                if state["got_pcm"] and time.time() - state["last_pcm"] >= 5:
+                    break
+        finally:
+            self._on_event = lambda r: None
+            self.ws.settimeout(30)
+
+        if not bidi:
+            raise CDPError("no bidiGenerateContent request observed (Talk failed?)")
+
+        # ---- Stop session (giải phóng farmer, không burn thêm) ----
+        try:
+            self._ev("""(() => {
+              const stop = [...document.querySelectorAll('button')].find(b => b.offsetParent &&
+                /stop|disconnect|end/i.test((b.getAttribute('aria-label')||'') +
+                  (b.textContent||'')));
+              if (stop) { stop.click(); return 'stopped'; } return 'no-stop';
+            })()""")
+        except Exception:
+            pass
+
+        ltext, pcm = _live_decode(bodies, text)
+        return {"text": ltext, "pcm_b64": "".join(pcm), "frames": len(bodies),
+                "request_count": len(bodies), "ours": True,
+                "raw": "\n".join(bodies)[:100000]}
+
+    # ------------------------------------------------------------------
+    # 13/09 B3: Veo (GenerateVideo → GetGenerateVideoOperation poll) — §14.2.
+    # Source-level: request [model, prompt, api_key?] (field 1/2/7); op poll
+    # [name, api_key?]. Capture-driven qua UI /prompts/new_video; model swap
+    # qua window.__vswap (HOOK mở rộng). CHƯA runtime-verified trước E2E.
+    # ------------------------------------------------------------------
+    def generate_video(self, text: str, model: str, timeout_s: int = 300) -> dict:
+        self._connect()
+        self._ensure_hook()
+
+        base = aistudio_url_for(getattr(self, "_page_url", None))
+        vurl = base.replace("/prompts/new_chat", "/prompts/new_video")
+        sep = "&" if "?" in vurl else "?"
+        self._send("Page.navigate",
+                   {"url": f"{vurl}{sep}model={model.replace('models/', '', 1)}"})
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(2)
+            if self._ev("!!document.querySelector('textarea')"):
+                break
+        if not self._ev("!!document.querySelector('textarea')"):
+            raise CDPError("veo UI never loaded (no textarea)")
+
+        self._ev(f'window.__vswap = {json.dumps({"model": model})}')
+
+        msg = json.dumps(text)
+        trig = self._ev(f"""(async () => {{
+          const ta = document.querySelector('textarea');
+          if (!ta) return 'no-input';
+          ta.focus();
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          setter.call(ta, {msg});
+          ta.dispatchEvent(new Event('input', {{bubbles: true}}));
+          await new Promise(r => setTimeout(r, 800));
+          const run = [...document.querySelectorAll('button')]
+            .find(b => (b.textContent||'').trim().toLowerCase().startsWith('run') && !b.disabled);
+          if (!run) return 'no-run-btn';
+          run.click(); return 'sent';
+        }})()""")
+        if trig != "sent":
+            raise CDPError(f"veo trigger failed: {trig}")
+
+        # capture: GenerateVideo RPC + op polls + mọi body mime video/* (mp4 fetch)
+        vids: dict = {}
+        rpcs: dict = {}
+        state = {"last_activity": time.time(), "have_video": False}
+
+        def on_evt(r):
+            m, p = r.get("method", ""), r.get("params", {}) or {}
+            if m == "Network.requestWillBeSent":
+                u = p.get("request", {}).get("url", "")
+                if "GenerateVideo" in u:
+                    rpcs[p["requestId"]] = {"url": u, "done": False,
+                                            "post": (p.get("request", {}).get("postData") or "")[:300]}
+                    state["last_activity"] = time.time()
+            elif m == "Network.responseReceived":
+                rp = p.get("response", {}) or {}
+                mime = (rp.get("mimeType") or "")
+                if mime.startswith("video/"):
+                    vids[p["requestId"]] = {"url": p.get("response", {}).get("url", ""),
+                                            "mime": mime, "done": False}
+                    state["last_activity"] = time.time()
+            elif m == "Network.loadingFinished":
+                rid = p.get("requestId")
+                if rid in rpcs:
+                    rpcs[rid]["done"] = True
+                    state["last_activity"] = time.time()
+                if rid in vids:
+                    vids[rid]["done"] = True
+                    state["last_activity"] = time.time()
+
+        self._on_event = on_evt
+        deadline = time.time() + timeout_s
+        t_veo_start = time.time()
+        rpc_bodies, video_parts = [], []
+        try:
+            while time.time() < deadline:
+                self.ws.settimeout(3)
+                try:
+                    on_evt(json.loads(self.ws.recv()))
+                except websocket.WebSocketTimeoutException:
+                    pass
+                for rid, e in list(rpcs.items()):
+                    if e["done"] and not e.get("fetched"):
+                        e["fetched"] = True
+                        try:
+                            b = self._send("Network.getResponseBody", {"requestId": rid})
+                            e["body"] = b.get("body") or ""
+                            rpc_bodies.append(e["body"])
+                            state["last_activity"] = time.time()
+                        except Exception:
+                            e["body"] = ""
+                for rid, e in list(vids.items()):
+                    if e["done"] and not e.get("fetched"):
+                        e["fetched"] = True
+                        try:
+                            b = self._send("Network.getResponseBody", {"requestId": rid})
+                            body = b.get("body") or ""   # base64 của mp4
+                            video_parts.append({"mime": e["mime"], "b64": body})
+                            state["have_video"] = True
+                            state["last_activity"] = time.time()
+                        except Exception:
+                            pass
+                # settle: có video HOẶC mọi rpc xong + 10s im
+                quiet = time.time() - state["last_activity"] >= 10
+                all_rpc_done = rpcs and all(e.get("fetched") for e in rpcs.values())
+                if state["have_video"] and quiet:
+                    break
+                if all_rpc_done and quiet and time.time() - t_veo_start > 20:
+                    break
+        finally:
+            self._on_event = lambda r: None
+            self.ws.settimeout(30)
+
+        if not rpcs:
+            raise CDPError("no GenerateVideo request observed (Run failed?)")
+
+        full = "\n".join(rpc_bodies)
+        # video bytes ưu tiên; fallback URL googleusercontent trong op body
+        video_b64 = None
+        if video_parts:
+            video_b64 = video_parts[0]
+        urls = re.findall(r'https://[A-Za-z0-9.-]*googleusercontent\.com/[^\s"\\]+', full)
+        return {"video_b64": video_b64, "video_url": urls[0] if urls else None,
+                "request_count": len(rpcs), "ours": True, "raw": full[:100000]}
 
 
 if __name__ == "__main__":

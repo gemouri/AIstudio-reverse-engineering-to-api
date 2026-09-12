@@ -73,6 +73,17 @@ def _count_request():
         pass
 
 
+def _pcm_to_wav_b64(pcm_b64: str) -> str:
+    """PCM 16-bit mono 24kHz (Live API §14.6) → WAV container b64."""
+    import base64
+    import struct
+    raw = base64.b64decode(pcm_b64)
+    hdr = b"RIFF" + struct.pack("<I", 36 + len(raw)) + b"WAVEfmt " + \
+        struct.pack("<IHHIIHH", 16, 1, 1, 24000, 48000, 2, 16) + b"data" + \
+        struct.pack("<I", len(raw))
+    return base64.b64encode(hdr + raw).decode()
+
+
 def build_gemini_history(messages: list) -> tuple[str | None, list | None, str]:
     """Build (system, history=None, typed_text) for the waa-binding reality.
 
@@ -140,14 +151,9 @@ def chat_completions():
     payload = request.get_json(force=True, silent=True) or {}
     raw_model = payload.get("model") or "gemini-3.8-flash"
     model = raw_model[4:] if raw_model.startswith("asr_") else raw_model
-    if model not in MODELS and model not in INTERACTION_MODELS:
-        e = BY_ID.get(model)
-        if e and e["protocol"] in ("live", "longrunning"):
-            return jsonify(error={
-                "message": f"'{model}' protocol ({e['protocol']}) is reverse-engineered "
-                          f"but not yet wired into the API — see docs/protocol-notebook.md "
-                          f"§14.6 (Live) / §14.2 (Veo) for the captured shapes.",
-                "type": "not_implemented"}), 501
+    entry = BY_ID.get(model)
+    # 13/09 B3: BY_ID giờ là SSOT dispatch — live/longrunning có branch riêng
+    if entry is None:
         return jsonify(error={"message": f"model '{raw_model}' not found",
                               "type": "invalid_request_error"}), 404
     messages = payload.get("messages") or []
@@ -163,6 +169,82 @@ def chat_completions():
     entry = plan["entry"]
 
     _count_request()
+
+    # ---- Live API branch (13/09 B3 — bidiGenerateContent WebChannel §14.6) ----
+    if entry["protocol"] == "live":
+        last_user = next((m.get("content") or "" for m in reversed(messages)
+                          if m.get("role") == "user"), "Hello.")
+        if not isinstance(last_user, str):   # multimodal content list → flatten text
+            last_user = " ".join(p.get("text", "") for p in last_user
+                                 if isinstance(p, dict)) or "Hello."
+        drv = Driver()
+        t0 = time.time()
+        try:
+            with FARMER_LOCK:
+                out = drv.live_session(last_user, entry["model"],
+                                        timeout_s=int(os.environ.get("AIS2A_LIVE_TIMEOUT", "120")))
+        except CDPError as e:
+            return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
+        except Exception as e:
+            return jsonify(error={"message": f"driver error: {e}", "type": "server_error"}), 502
+
+        answer = (out.get("text") or "").strip()
+        pcm_b64 = out.get("pcm_b64") or ""
+        ACTIVE.record(model, cost=1, ok=bool(answer or pcm_b64))
+        if not answer and not pcm_b64:
+            return jsonify(error={"message": "live session returned no text/audio (schema drift?)",
+                                  "type": "server_error"}), 502
+        msg = {"role": "assistant", "content": answer or "(voice-only reply)"}
+        if pcm_b64:
+            msg["media"] = [f"data:audio/wav;base64,{_pcm_to_wav_b64(pcm_b64)}"]
+        meta = {"elapsed_s": round(time.time() - t0, 1), "protocol": "live",
+                "frames": out.get("frames"), "model_verified": entry["model"],
+                "quota_spend": ACTIVE.spend, "quota_budget": ACTIVE.daily_budget}
+        return jsonify(
+            id=f"chatcmpl-aistudio{int(time.time()*1000)}", object="chat.completion",
+            created=int(time.time()), model=model,
+            choices=[{"index": 0, "message": msg, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            aistudio_rev_meta=meta,
+        )
+
+    # ---- Veo video branch (13/09 B3 — GenerateVideo predictLongRunning §14.2) ----
+    if entry["protocol"] == "longrunning":
+        last_user = next((m.get("content") or "" for m in reversed(messages)
+                          if m.get("role") == "user"), "A calm ocean wave at sunset.")
+        if not isinstance(last_user, str):
+            last_user = " ".join(p.get("text", "") for p in last_user
+                                 if isinstance(p, dict)) or "A calm ocean wave at sunset."
+        drv = Driver()
+        t0 = time.time()
+        try:
+            with FARMER_LOCK:
+                out = drv.generate_video(last_user, entry["model"],
+                                         timeout_s=int(os.environ.get("AIS2A_VIDEO_TIMEOUT", "600")))
+        except CDPError as e:
+            return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
+        except Exception as e:
+            return jsonify(error={"message": f"driver error: {e}", "type": "server_error"}), 502
+
+        ACTIVE.record(model, cost=1, ok=bool(out.get("video_b64") or out.get("video_url")))
+        if not out.get("video_b64") and not out.get("video_url"):
+            return jsonify(error={"message": "video generation returned no video (quota or slow op? raw: "
+                                            + (out.get("raw") or "")[:200] + ")",
+                                  "type": "server_error"}), 502
+        msg = {"role": "assistant",
+               "content": out.get("video_url") or "Video generated — see media field."}
+        if out.get("video_b64"):
+            msg["media"] = [f"data:{out['video_b64']['mime']};base64,{out['video_b64']['b64']}"]
+        meta = {"elapsed_s": round(time.time() - t0, 1), "protocol": "longrunning",
+                "request_count": out.get("request_count"),
+                "quota_spend": ACTIVE.spend, "quota_budget": ACTIVE.daily_budget}
+        return jsonify(
+            id=f"chatcmpl-aistudio{int(time.time()*1000)}", object="chat.completion",
+            created=int(time.time()), model=model,
+            choices=[{"index": 0, "message": msg, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            aistudio_rev_meta=meta,
+        )
 
     # ---- Interactions API branch (omni / deep-research) ----
     # Single-turn: flatten toàn transcript thành 1 prompt typed (waa bind).
@@ -191,10 +273,13 @@ def chat_completions():
 
         drv = Driver()
         t0 = time.time()
+        # B1-fix (13/09): agent tier cần fetch/process artifacts lớn — 420s
+        # hardcode từng timeout giữa response. 600s mặc định + env override.
+        agent_timeout = int(os.environ.get("AIS2A_AGENT_TIMEOUT", "600"))
         try:
             with FARMER_LOCK:
                 out = drv.generate_interaction(typed, INTERACTION_MODELS[model],
-                                                timeout_s=420,
+                                                timeout_s=agent_timeout,
                                                 ui_model=entry.get("ui_model"))
         except CDPError as e:
             return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
