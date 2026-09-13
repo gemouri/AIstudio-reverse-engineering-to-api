@@ -12,14 +12,13 @@ Requires: farmer Chrome on 127.0.0.1:9333 with AI Studio tab open (auto-reopens 
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 import urllib.request
 
 import websocket
 
-CDP_HTTP = os.environ.get("AIS2A_CDP_URL", "http://127.0.0.1:9333") + "/json/list"
+CDP_HTTP = "http://127.0.0.1:9333/json/list"
 AISTUDIO_URL = "https://aistudio.google.com/prompts/new_chat"
 
 def aistudio_url_for(page_url: str | None = None) -> str:
@@ -457,7 +456,7 @@ class Driver:
                              for e in events],
                 "raw_head": raw[:1500],
             }
-            (_P(os.environ.get("AIS2A_DATA_DIR", str(Path(__file__).resolve().parents[2] / "data"))) / "lastgen.json").write_text(
+            (_P(r"D:\PROJECTS\aistudio-rev\corpus") / "lastgen.json").write_text(
                 json.dumps(_dump, indent=1), encoding="utf-8")
         except Exception:
             pass
@@ -517,7 +516,7 @@ class Driver:
 
         # type + click Run (Run button text-based — interaction UI dùng text 'Run')
         msg = json.dumps(text)
-        trig = self._ev(f"""(async () => {{
+        trig_js = f"""(async () => {{
           const ta = document.querySelector('textarea');
           if (!ta) return 'no-input';
           ta.focus();
@@ -530,7 +529,8 @@ class Driver:
           if (!run) return 'no-run-btn';
           run.click();
           return 'sent';
-        }})()""")
+        }})()"""
+        trig = self._ev(trig_js)
         if trig not in ("sent",):
             raise CDPError(f"interaction trigger failed: {trig}")
 
@@ -563,6 +563,41 @@ class Driver:
                     on_evt(json.loads(self.ws.recv()))
                 except websocket.WebSocketTimeoutException:
                     pass
+            # 13/09 FIX (Pro paid-lock race, interaction path): 15s không có
+            # request → Run click bị "No API key selected" NUỐT. Trên account
+            # Pro, SPA mount model paid mặc định (3.8 Flash + lock) trong lúc
+            # load trước khi áp model host từ URL — driver click Run quá sớm
+            # (textarea hiện trước model selector settle) → 0 request →
+            # ngồi chờ hết deadline 600s ("tab không biến chuyển gì").
+            # Account free không có paid default → không gặp race này.
+            # Chờ lock clear (tối đa 45s) rồi re-trigger 1 lần; vẫn không có
+            # request → fail NHANH với message rõ thay vì hang 600s.
+            if not events:
+                lock_deadline = time.time() + 45
+                lock = True
+                while time.time() < lock_deadline:
+                    lock = self._ev(
+                        "!![...document.querySelectorAll('button')]"
+                        ".find(b=>/no api key/i.test(b.getAttribute('aria-label')||'')"
+                        "&&b.offsetParent)")
+                    if not lock:
+                        break
+                    time.sleep(2)
+                if not lock:
+                    print("[driver] interaction Run swallowed by paid-lock — "
+                          "re-trigger after model settle…", flush=True)
+                    self._ev(trig_js)
+                    t = time.time() + 20
+                    while time.time() < t and not events:
+                        self.ws.settimeout(2)
+                        try:
+                            on_evt(json.loads(self.ws.recv()))
+                        except websocket.WebSocketTimeoutException:
+                            pass
+                if not events:
+                    raise CDPError(
+                        "no CreateInteraction request — Run swallowed by "
+                        "paid-model lock (re-trigger failed; check farmer tab)")
             # wait for completion (stream chảy lâu — deep-research nhiều phút)
             first_done = None
             while time.time() < deadline:
@@ -899,7 +934,7 @@ class Driver:
 
 if __name__ == "__main__":
     import sys
-    sys.path.insert(0, r".\src\lib")
+    sys.path.insert(0, r"D:\PROJECTS\aistudio-rev\src\lib")
     from extract import extract_answer
 
     drv = Driver()

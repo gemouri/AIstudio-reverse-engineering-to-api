@@ -17,22 +17,21 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, request, stream_with_context
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, r"D:\PROJECTS\aistudio-rev\src")
+sys.path.insert(0, r"D:\PROJECTS\aistudio-rev\src\lib")
 
 from replay.driver import CDPError, Driver           # noqa: E402
 from extract import extract_answer, extract_thinking, extract_usage, extract_media  # noqa: E402
 from extract_interaction import extract_interaction  # noqa: E402
 from tools import openai_tools_to_gemini, find_function_calls       # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, r"D:\PROJECTS\aistudio-rev\src\facade")
 from registry import BY_ID, REGISTRY, ACTIVE, route as route_model  # noqa: E402
 
 app = Flask(__name__)
 
-ROOT = Path(__file__).resolve().parents[2]
-STATE = ROOT / "data" / "rate_state.json"
-STATE.parent.mkdir(parents=True, exist_ok=True)
+ROOT = Path(r"D:\PROJECTS\aistudio-rev")
+STATE = ROOT / "corpus" / "rate_state.json"
 
 # 12/09: farmer = 1 tab Chrome duy nhất — mọi request phải SERIAL.
 # Không lock: 2 request chồng nhau → navigate giữa chừng của nhau →
@@ -232,9 +231,10 @@ def chat_completions():
         meta = {"elapsed_s": round(time.time() - t0, 1), "protocol": "live",
                 "frames": out.get("frames"), "model_verified": entry["model"],
                 "quota_spend": ACTIVE.spend, "quota_budget": ACTIVE.daily_budget}
+        created = int(time.time())
         return jsonify(
             id=f"chatcmpl-aistudio{int(time.time()*1000)}", object="chat.completion",
-            created=int(time.time()), model=model,
+            created=created, model=model,
             choices=[{"index": 0, "message": msg, "finish_reason": "stop"}],
             usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             aistudio_rev_meta=meta,
@@ -307,8 +307,11 @@ def chat_completions():
 
         drv = Driver()
         t0 = time.time()
-        # B1-fix (13/09): agent tier cần fetch/process artifacts lớn — 420s
-        # hardcode từng timeout giữa response. 600s mặc định + env override.
+        # B1-fix (13/09): agent tier (deep-research/antigravity) cần thời gian
+        # fetch/process artifacts lớn — 420s hardcode từng timeout giữa
+        # response 1.8MB. Nâng 600s mặc định + env override AIS2A_AGENT_TIMEOUT.
+        # Driver đã có early-return (settle 6s sau khi mọi stream done) nên
+        # tăng deadline KHÔNG làm request nhanh hơn chậm.
         agent_timeout = int(os.environ.get("AIS2A_AGENT_TIMEOUT", "600"))
         try:
             with farmer_pipeline(model):
@@ -321,6 +324,14 @@ def chat_completions():
             return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
         except Exception as e:
             return jsonify(error={"message": f"driver error: {e}", "type": "server_error"}), 502
+
+        # 13/09 instrumentation: dump raw interaction response cho debug
+        try:
+            from pathlib import Path as _P
+            (_P(r"D:\PROJECTS\aistudio-rev\corpus") / "last_interaction_raw.json").write_text(
+                out["raw"], encoding="utf-8")
+        except Exception:
+            pass
 
         ix = extract_interaction(out["raw"])
         answer, reasoning = ix["answer"], ix["thinking"]
@@ -551,7 +562,8 @@ def health():
         hooked = drv._ev("window.__asrHooked === 1")
         held_s = round(time.time() - _lock_info["since"], 1) if _lock_info["since"] else 0
         return jsonify(status="ok" if hooked else "degraded", hook=hooked,
-                       busy=bool(_lock_info["model"]), running_model=_lock_info["model"],
+                       busy=bool(_lock_info["model"]),
+                       running_model=_lock_info["model"],
                        running_for_s=held_s)
     except Exception as e:
         return jsonify(status="down", error=str(e)[:150]), 503

@@ -58,6 +58,23 @@ def extract_interaction(raw: str) -> dict:
     out = {"answer": "", "thinking": "", "model": None, "usage": None,
            "error": None, "images": [], "sources": None}
     events = _iter_events(raw)
+
+    # 13/09 FIX: error frame [N, "msg", ...] nằm TOP-LEVEL của body (item riêng
+    # bên cạnh các stream chunks) — _iter_events flatten từng chunk (events.extend)
+    # nên frame lỗi bị UNPACK/ghép chung mất → err=None → facade trả "empty
+    # schema drift" 502 thay vì 429 quota thật (omni-1.1-flash trên Pro /u/2/,
+    # runtime-verified: item[1] = [8, "You exceeded your current quota…", [...]]).
+    try:
+        _body = json.loads(raw) if raw.strip().startswith("[") else None
+        if isinstance(_body, list):
+            for _it in _body:
+                if (isinstance(_it, list) and _it and isinstance(_it[0], int)
+                        and isinstance(_it[1], str) and len(_it[1]) > 10
+                        and not _it[1].startswith("[")):
+                    out["error"] = f"[{_it[0]}] {_it[1][:200]}"
+    except Exception:
+        pass
+
     answer, thinking = [], []
 
     # Quota/permission error frame: [N, "error text"] nằm ở top-level của
