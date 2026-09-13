@@ -437,7 +437,9 @@ def chat_completions():
     #   [[[null,[4,"The prompt could not be submitted…"]…]]]  (policy filter)
     # Bóc bằng regex không-anchors — tìm [N,"msg"] gần đầu payload; N: 3=invalid
     # argument/thinking, 4=prohibited content, 8=quota.
-    if not answer and not reasoning and not tool_calls:
+    # 13/09 FIX (cat-image run): image models trả 0 text — empty-check phải tính
+    # `media`, nếu không 502 "empty schema drift" dù ảnh đã capture (bug gốc).
+    if not answer and not reasoning and not tool_calls and not media:
         m = re.search(r'\[\s*(?:,\s*)?\[\s*([0-9]+)\s*,\s*"([^"]{1,300})', out["raw"][:3000])
         if m and int(m.group(1)) in (3, 4, 8):
             code, msg = int(m.group(1)), m.group(2)
@@ -544,6 +546,12 @@ def chat_completions():
         msg["tool_calls"] = tool_calls
     if media_uris:
         msg["media"] = media_uris          # data-URI list — render được mọi nơi
+        # 13/09 FIX (cat-image E2E): image models trả text rỗng — nếu chỉ để
+        # ảnh trong field media riêng thì client chuẩn (Hermes/OpenWebUI) thấy
+        # content=None → hiển thị trống trơn. Ghép ảnh vào content dạng
+        # markdown data-URI để MỌI client render được.
+        if not answer:
+            msg["content"] = "\n\n".join(f"![media]({u})" for u in media_uris)
     return jsonify(
         id=completion_id, object="chat.completion", created=created, model=model,
         choices=[{"index": 0, "message": msg,
