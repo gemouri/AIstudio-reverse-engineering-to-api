@@ -11,6 +11,7 @@ import os
 import re
 import time
 import threading
+import contextlib
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -37,6 +38,35 @@ STATE.parent.mkdir(parents=True, exist_ok=True)
 # Không lock: 2 request chồng nhau → navigate giữa chừng của nhau →
 # "did not contain our text" 502 cho người thua (bắt gặp 97/50 quota burn).
 FARMER_LOCK = threading.Lock()
+
+# 13/09 hardening (sau incident "mọi model chết im, tab không động tác"):
+# 1 thread interaction chết từng giữ FARMER_LOCK vĩnh viễn → mọi request sau
+# xếp hàng VÔ HẠN — client không thấy gì, tab Chrome không động. Giờ:
+#   - acquire CÓ timeout (env AIS2A_LOCK_WAIT, default 90s) → thua cuộc nhận
+#     503 farmer_busy rõ ràng thay vì treo im (client retry được ngay)
+#   - /health báo held_model + held_s → nhìn 1 phát biết pipeline đang chạy gì
+#   - nhiều session Hermes cùng dùng: serialize qua 1 facade — an toàn
+_lock_info = {"model": None, "since": 0.0}
+
+
+class FarmerBusy(RuntimeError):
+    """Farmer pipeline đang bận — request này nhận 503, thử lại sau."""
+
+
+@contextlib.contextmanager
+def farmer_pipeline(model_id: str, wait_s: float | None = None):
+    wait = wait_s if wait_s is not None else float(os.environ.get("AIS2A_LOCK_WAIT", "90"))
+    if not FARMER_LOCK.acquire(timeout=wait):
+        held = round(time.time() - _lock_info["since"], 1) if _lock_info["since"] else -1
+        raise FarmerBusy(
+            f"farmer pipeline busy (running model={_lock_info['model']} for {held}s) — "
+            f"one Chrome tab serves requests serially; retry shortly")
+    _lock_info.update(model=model_id, since=time.time())
+    try:
+        yield
+    finally:
+        _lock_info.update(model=None, since=0.0)
+        FARMER_LOCK.release()
 
 # 12/09 REFACTOR: model routing giờ đọc từ src/facade/registry.py (SSOT).
 # Mọi model entry: id/model/protocol/tier/media/thinking/attached.
@@ -180,9 +210,11 @@ def chat_completions():
         drv = Driver()
         t0 = time.time()
         try:
-            with FARMER_LOCK:
+            with farmer_pipeline(model):
                 out = drv.live_session(last_user, entry["model"],
                                         timeout_s=int(os.environ.get("AIS2A_LIVE_TIMEOUT", "120")))
+        except FarmerBusy as e:
+            return jsonify(error={"message": str(e), "type": "farmer_busy"}), 503
         except CDPError as e:
             return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
         except Exception as e:
@@ -218,9 +250,11 @@ def chat_completions():
         drv = Driver()
         t0 = time.time()
         try:
-            with FARMER_LOCK:
+            with farmer_pipeline(model):
                 out = drv.generate_video(last_user, entry["model"],
                                          timeout_s=int(os.environ.get("AIS2A_VIDEO_TIMEOUT", "600")))
+        except FarmerBusy as e:
+            return jsonify(error={"message": str(e), "type": "farmer_busy"}), 503
         except CDPError as e:
             return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
         except Exception as e:
@@ -277,10 +311,12 @@ def chat_completions():
         # hardcode từng timeout giữa response. 600s mặc định + env override.
         agent_timeout = int(os.environ.get("AIS2A_AGENT_TIMEOUT", "600"))
         try:
-            with FARMER_LOCK:
+            with farmer_pipeline(model):
                 out = drv.generate_interaction(typed, INTERACTION_MODELS[model],
                                                 timeout_s=agent_timeout,
                                                 ui_model=entry.get("ui_model"))
+        except FarmerBusy as e:
+            return jsonify(error={"message": str(e), "type": "farmer_busy"}), 503
         except CDPError as e:
             return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
         except Exception as e:
@@ -359,13 +395,15 @@ def chat_completions():
     drv = Driver()
     t0 = time.time()
     try:
-        with FARMER_LOCK:   # serialize toàn bộ farmer interaction (navigate→type→capture)
+        with farmer_pipeline(model):   # serialize toàn bộ farmer interaction (navigate→type→capture)
             out = drv.generate(last_user, MODELS[model],
                            temperature=payload.get("temperature"),
                            thinking=thinking,
                            tools=gemini_tools,
                            system=system,
                            history=history)
+    except FarmerBusy as e:
+        return jsonify(error={"message": str(e), "type": "farmer_busy"}), 503
     except CDPError as e:
         return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
     except Exception as e:
@@ -511,7 +549,10 @@ def health():
         drv = Driver()
         drv._connect()
         hooked = drv._ev("window.__asrHooked === 1")
-        return jsonify(status="ok" if hooked else "degraded", hook=hooked)
+        held_s = round(time.time() - _lock_info["since"], 1) if _lock_info["since"] else 0
+        return jsonify(status="ok" if hooked else "degraded", hook=hooked,
+                       busy=bool(_lock_info["model"]), running_model=_lock_info["model"],
+                       running_for_s=held_s)
     except Exception as e:
         return jsonify(status="down", error=str(e)[:150]), 503
 
