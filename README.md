@@ -33,6 +33,20 @@ Everything in the table was verified end-to-end against the real AI Studio
 runtime — captures, decoded protocol shapes and per-family notes live in
 `docs/protocol-notebook.md`.
 
+### Deep Research Max — end-to-end (screenshots)
+
+A full `deep-research-max` run from a normal OpenAI client, using a real
+research prompt ("Southeast Asia's economic development prospects over the
+next 5–10 years"):
+
+| AI Studio side (the browser this API drives) | Client side (OpenWebUI talking to `/v1`) |
+|---|---|
+| ![AI Studio running Deep Research Max](docs/screenshots/deep-research-max-aistudio.png) | ![Client receiving the full report](docs/screenshots/deep-research-max-client.png) |
+
+What the run returned: a 53k-char report, the research plan in
+`reasoning_content`, a generated PNG chart ("Singapore Dominates ASEAN FDI")
+in `message.media`, and 76 cited sources in `message.sources`.
+
 ## Quick start
 
 ```bash

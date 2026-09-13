@@ -353,6 +353,24 @@ B: research result frame). Facade surface thêm `media` (data-URI PNG) +
 Verified: deep-research "capital of France" → answer 334 chars + thinking
 2560 chars + 1 PNG artifact + 5 sources.
 
+**13/09 update — deep-research-max trả shape A multi-part (runtime-verified,
+SE Asia run)**: response = chuỗi answer-deltas, KHÔNG phải 1 result frame B:
+
+```
+event[10]  e[10][1][0][0]  = text part 1 (14.5k chars)
+event[12]  e[10][1] = [None, [1, <b64 PNG>]]  → b64 tại e[10][1][1][1]
+           (PNG header iVBORw0…; guard len>1000 + header check)
+event[13]  e[10][1][0][0]  = text part 2 (38.7k chars)
+```
+
+2 bugs đã fix trong extractor: (1) thiếu branch image trong shape-A loop;
+(2) elif-chain cũ check `v[1][5]` (thinking) trên list len 2 → IndexError →
+`except` nuốt cả chuỗi → image branch dù có cũng không chạy — image check
+phải đứng TRƯỚC thinking check. E2E 13/09 (SE Asia research, /u/3/):
+53.298-char report + PNG chart 99.983 bytes ("Singapore Dominates ASEAN
+FDI", FDI 2024: SG $143B / VN $25.35B / ID $24B / MY $12.2B) + 76 sources —
+screenshots `docs/screenshots/deep-research-max-*.png`.
+
 ### 14.8 Model registry + smart quota (12/09 tối) — user request
 
 `src/facade/registry.py` = SSOT 26 models:

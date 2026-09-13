@@ -108,13 +108,24 @@ def extract_interaction(raw: str) -> dict:
             except (TypeError, IndexError):
                 pass
 
-        # deltas (shape A — omni)
+        # deltas (shape A — omni & deep-research multi-part stream, 13/09)
         if len(e) > 10 and isinstance(e[10], list) and len(e[10]) >= 2:
             v = e[10]
             try:
                 if v[0] == 1 and isinstance(v[1], list) and v[1] and isinstance(v[1][0], list):
                     answer.append(v[1][0][0])          # answer text delta
-                elif v[1] and isinstance(v[1][5], list) and v[1][5]:
+                # 13/09 image artifact delta (deep-research, runtime-verified):
+                # e[10][1] = [None, [1, <b64 PNG>]] — b64 tại v[1][1][1];
+                # PHẢI đứng trước thinking check: len(v[1])==2 làm v[1][5]
+                # IndexError → except nuốt cả elif-chain (bug elif gốc, 13/09).
+                elif (isinstance(v[1], list) and len(v[1]) > 1
+                        and isinstance(v[1][1], list) and len(v[1][1]) >= 2
+                        and isinstance(v[1][1][1], str)
+                        and len(v[1][1][1]) > 1000
+                        and v[1][1][1][:7] in ("iVBORw0", "/9j/4AA", "UklGRv")):
+                    out["images"].append(v[1][1][1])
+                elif v[1] and isinstance(v[1], list) and len(v[1]) > 5 \
+                        and isinstance(v[1][5], list) and v[1][5]:
                     thinking.append(v[1][5][0][0][0])  # thinking text delta
             except (TypeError, IndexError):
                 pass
