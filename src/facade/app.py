@@ -309,10 +309,11 @@ def chat_completions():
         t0 = time.time()
         # B1-fix (13/09): agent tier (deep-research/antigravity) cần thời gian
         # fetch/process artifacts lớn — 420s hardcode từng timeout giữa
-        # response 1.8MB. Nâng 600s mặc định + env override AIS2A_AGENT_TIMEOUT.
+        # response 1.8MB. 13/09 tối (SE Asia research 9.5 phút): nâng default
+        # 600→1500s (user directive: research max có thể chạy 20-25 phút).
         # Driver đã có early-return (settle 6s sau khi mọi stream done) nên
         # tăng deadline KHÔNG làm request nhanh hơn chậm.
-        agent_timeout = int(os.environ.get("AIS2A_AGENT_TIMEOUT", "600"))
+        agent_timeout = int(os.environ.get("AIS2A_AGENT_TIMEOUT", "1500"))
         try:
             with farmer_pipeline(model):
                 out = drv.generate_interaction(typed, INTERACTION_MODELS[model],
