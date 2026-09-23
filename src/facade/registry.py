@@ -9,7 +9,7 @@ Nguồn dữ liệu (ground truth đã verify):
 
 Thiết kế:
   Model          — id/protocol/tier/media/thinking/context/attached
-  Account        — pool + daily budget + per-model counters
+  Account        — pool + per-model spend counters (thống kê; 13/09 bỏ gate)
   route(model)   — model → (account, driver_path) với quota-awareness
 
 Protocol families (runtime-verified):
@@ -20,7 +20,7 @@ Protocol families (runtime-verified):
 
 Tier semantics (AI Studio web, KHÔNG phải API pricing):
   free    — flash-lite family + gemma: free tier AI Studio, không lock
-  pro     — flash/pro family: burn quota Pro (67/50 observed → cap 50/day)
+  pro     — flash/pro family: burn Google Pro quota thật — no local cap (13/09)
   premium — image/music/video: media generation, quota riêng theo slot
   agent   — antigravity/deep-research: wrapper, burn theo attached model
 """
@@ -68,7 +68,7 @@ REGISTRY: list[dict] = [
      "protocol": "generate", "tier": "free", "media": ["text"],
      "thinking": None, "tabs": ["Gemma"], "note": ""},
 
-    # ---- pro tier (burn quota Pro ~50/day observed) ----
+    # ---- pro tier (burn Google Pro quota — no local cap 13/09) ----
     {"id": "gemini-3.8-flash", "model": "models/gemini-3.8-flash",
      "protocol": "generate", "tier": "pro", "media": ["text"],
      "thinking": "high", "tabs": ["Gemini"], "note": "E2E verified §14"},
@@ -173,12 +173,12 @@ BY_ID = {m["id"]: m for m in REGISTRY}
 class Account:
     """1 farmer Chrome profile / AI Studio account."""
 
-    def __init__(self, u_prefix: str, email: str, pro: bool,
-                 daily_budget: int = 50):
+    def __init__(self, u_prefix: str, email: str, pro: bool):
         self.u = u_prefix            # "/u/2/"
         self.email = email
         self.pro = pro
-        self.daily_budget = daily_budget   # quota Pro/day (67/50 observed → 50)
+        # 13/09 user directive: KHÔNG local daily budget — Google server
+        # error frame [8] (facade map 429 + message thật) là limit duy nhất.
         _u = u_prefix.strip('/').replace('/', '_')
         # B2-fix (13/09): runtime ledger file riêng + merge-preserve —
         # schema drift an toàn (không mất key lạ ai đó ghi vào cùng file)
@@ -218,16 +218,11 @@ class Account:
         self.spend += cost
         self.save()
 
-    def budget_left(self) -> int:
-        return max(0, self.daily_budget - self.spend)
-
-
 # Public build: account = farmer session đang mở (u-prefix tự detect trong
-# driver._connect từ URL tab). Budget là heuristic local — Google không expose
-# quota số; server error frame (map 429/400 trong facade) mới là nguồn chân thực.
+# driver._connect từ URL tab). 13/09: bỏ local budget (user directive) —
+# Google server error frame (map 429/400 trong facade) là nguồn chân thực duy nhất.
 def _auto_account() -> Account:
-    return Account("", "farmer-session (auto)", pro=True,
-                   daily_budget=int(os.environ.get("AIS2A_DAILY_BUDGET", "50")))
+    return Account("", "farmer-session (auto)", pro=True)
 
 
 ACCOUNTS: list[Account] = [_auto_account()]
@@ -243,10 +238,10 @@ def route(model_id: str) -> dict:
       entry             — registry entry
       driver_call       — "generate" | "generate_interaction" | "live" | "longrunning"
       media_expected    — các part shapes extractor cần surface
-    Quota policy:
+    Quota policy (13/09 — no local budget):
       free   → mọi account, cost 0
-      pro    → account Pro còn budget; hết → 429 (chưa có failover tab)
-      premium/agent → chỉ account Pro; cost 1 (agent có thể +1 attached)
+      pro/premium/agent → account Pro; hết quota → Google error frame [8]
+                          → facade map 429 message thật về client
     """
     e = BY_ID.get(model_id)
     if not e:
@@ -255,11 +250,8 @@ def route(model_id: str) -> dict:
                 "known_models": known}
     if e["tier"] != "free" and not ACTIVE.pro:
         return {"ok": False, "error": "needs Pro account", "entry": e}
-    if e["tier"] != "free" and ACTIVE.budget_left() <= 0:
-        return {"ok": False,
-                "error": f"quota exhausted on {ACTIVE.email} "
-                         f"({ACTIVE.spend}/{ACTIVE.daily_budget}) — tomorrow or add account",
-                "entry": e}
+    # 13/09: bỏ local budget gate — Google quyết định qua error frame [8],
+    # facade map 429 + message thật (extract_interaction / empty-check regex).
     call = {"generate": "generate",
             "interaction": "generate_interaction",
             "live": "live_session",

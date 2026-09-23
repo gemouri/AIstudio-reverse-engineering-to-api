@@ -230,7 +230,7 @@ def chat_completions():
             msg["media"] = [f"data:audio/wav;base64,{_pcm_to_wav_b64(pcm_b64)}"]
         meta = {"elapsed_s": round(time.time() - t0, 1), "protocol": "live",
                 "frames": out.get("frames"), "model_verified": entry["model"],
-                "quota_spend": ACTIVE.spend, "quota_budget": ACTIVE.daily_budget}
+                "quota_spend": ACTIVE.spend}
         created = int(time.time())
         return jsonify(
             id=f"chatcmpl-aistudio{int(time.time()*1000)}", object="chat.completion",
@@ -271,7 +271,7 @@ def chat_completions():
             msg["media"] = [f"data:{out['video_b64']['mime']};base64,{out['video_b64']['b64']}"]
         meta = {"elapsed_s": round(time.time() - t0, 1), "protocol": "longrunning",
                 "request_count": out.get("request_count"),
-                "quota_spend": ACTIVE.spend, "quota_budget": ACTIVE.daily_budget}
+                "quota_spend": ACTIVE.spend}
         return jsonify(
             id=f"chatcmpl-aistudio{int(time.time()*1000)}", object="chat.completion",
             created=int(time.time()), model=model,
@@ -456,7 +456,7 @@ def chat_completions():
     meta = {"elapsed_s": round(time.time() - t0, 1), "requests_sent": out["request_count"],
             "thinking_level": thinking, "tools_injected": bool(gemini_tools),
             "aistudio_tier": entry["tier"], "protocol": entry["protocol"],
-            "quota_spend": ACTIVE.spend, "quota_budget": ACTIVE.daily_budget}
+            "quota_spend": ACTIVE.spend}
     # media surface (image/music): data-URI list — client render trực tiếp
     media_uris = [f"data:{m['mime']};base64,{m['b64']}" for m in media]
 
