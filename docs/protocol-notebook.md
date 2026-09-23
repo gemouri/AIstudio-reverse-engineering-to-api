@@ -174,6 +174,16 @@ Tools proto map (từ source gp() + capture):
 FunctionCall response part: [None×10, [name, [[[param,[None,None,val]]]], call_id]]
   (args 3-lớp bọc; id = "call_..." giống OpenAI)
 
+**BẪY Schema index 19 (23/09, runtime-verified):** proto index 19 là **`not`**,
+KHÔNG phải allOf. Bản cũ ghi `additionalProperties:false` vào p[19] → server trả
+400 **non-retryable**:
+`Invalid value at 'tools[0].function_declarations[N].parameters.properties[0].value.items.any_of[i].not': false`
+→ giết cả request với mọi client gửi JSON Schema kiểu pydantic
+`additionalProperties:false` (vd tool `skill_manage` của Hermes). `additionalProperties`
+không có field tương ứng trong Schema proto → bỏ qua tĩnh lặng, KHÔNG map.
+oneOf@16 / anyOf@17 / allOf@18 vẫn đúng (probe 23/09: 200 OK).
+Verify chuẩn: replay payload thật 40 tools của client → 200 + function calling OK.
+
 Façade agent mode (đã verify end-to-end):
 - OpenAI tools → Gemini proto: schema_to_proto + openai_tools_to_gemini
 - functionCall → tool_calls (chuẩn OpenAI: id/type/function.arguments JSON-string)
@@ -374,14 +384,15 @@ screenshots `docs/screenshots/deep-research-max-*.png`.
 ### 14.8 Model registry + smart quota (12/09 tối) — user request
 
 `src/facade/registry.py` = SSOT 26 models:
-- **tier**: free (lite/gemma — cost 0) / pro (flash/pro — cost 1, budget
-  50/day theo ledger observed) / premium (image/music/video/live) / agent
+- **tier**: free (lite/gemma — cost 0) / pro (flash/pro — cost 1) / premium
+  (image/music/video/live) / agent — 13/09: bỏ local cap 50/day (user
+  directive); Google error frame [8] là limit duy nhất.
   (antigravity, deep-research — wrapper quanh attached model slot[78]).
 - **protocol**: generate | interaction | live | longrunning — route() trả
   driver call tương ứng; /v1/models giờ trả metadata tier/protocol/media.
-- **Quota**: Account class + daily budget + per-model counters →
-  `corpus/quota_ledger_u2.json`; facade 429 khi hết budget; response meta
-  mang quota_spend/quota_budget.
+- **Quota** (13/09 update): Account class chỉ giữ per-model counters →
+  `corpus/quota_ledger_u2.json` (thống kê, KHÔNG gate); hết quota → Google
+  error frame [8] → facade map 429 message thật; meta chỉ còn quota_spend.
 - Media surface (extract_media): image/jpeg ×2 (pro-image), image/mpeg
   (lyria), interaction images+sources (deep-research) — data-URI trong
   `message.media`.
