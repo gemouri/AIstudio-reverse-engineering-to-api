@@ -54,8 +54,11 @@ def schema_to_proto(schema: dict) -> list:
         p[17] = [schema_to_proto(s) for s in schema["anyOf"]]
     if "allOf" in schema:
         p[18] = [schema_to_proto(s) for s in schema["allOf"]]
-    if schema.get("additionalProperties") is False:
-        p[19] = False
+    # KHÔNG map `additionalProperties` vào proto: index 19 = `not` trong Schema
+    # proto của AI Studio (không phải allOf) → server trả
+    #   "Invalid value at '...items.any_of[i].not': false"
+    # và giết cả request (400, non-retryable). additionalProperties không có
+    # field tương ứng → bỏ qua tĩnh lặng.
     if "propertyOrdering" in schema:
         p[22] = list(schema["propertyOrdering"])
     # keep full proto length (UI pads to 23+; unset fields = null are equivalent,
