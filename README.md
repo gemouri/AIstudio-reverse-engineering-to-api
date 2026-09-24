@@ -12,6 +12,32 @@ Chrome DevTools Protocol (CDP), then re-exposes everything as a standard
 > OpenWebUI, your own scripts...) at `http://127.0.0.1:8788/v1` and use the
 > same Gemini models you already use in the AI Studio web UI.
 
+## Documentation
+
+**Full usage guide** (setup, verification, models, media, limits, troubleshooting) —
+available in the 14 languages of the VAELK ecosystem:
+
+[English](docs/usage/en.md) ·
+[Dansk](docs/usage/da.md) ·
+[Deutsch](docs/usage/de.md) ·
+[Español](docs/usage/es.md) ·
+[Suomi](docs/usage/fi.md) ·
+[Français](docs/usage/fr.md) ·
+[हिन्दी](docs/usage/hi.md) ·
+[Italiano](docs/usage/it.md) ·
+[日本語](docs/usage/ja.md) ·
+[한국어](docs/usage/ko.md) ·
+[Nederlands](docs/usage/nl.md) ·
+[Svenska](docs/usage/sv.md) ·
+[Tiếng Việt](docs/usage/vi.md) ·
+[中文](docs/usage/zh.md)
+
+Also: [`docs/protocol-notebook.md`](docs/protocol-notebook.md) — the full
+reverse-engineering notebook and per-model audit.
+
+**Prerequisites:** a desktop OS with a display, Python 3.10+, Google Chrome, and
+a Google account that can open AI Studio.
+
 ## What it can do
 
 | Capability | Status | Notes |
@@ -30,7 +56,9 @@ Chrome DevTools Protocol (CDP), then re-exposes everything as a standard
 | **Live API (voice)** | ✅ working | `gemini-3.1-flash-live` — WebChannel long-poll, PCM 24 kHz → WAV in `message.media` (E2E 09-24) |
 | Veo (video) | ⛔ upstream-blocked (09-24) | `GenerateVideo` fires but the operation poll returns "entity not found" — blocked at Google's tier |
 
-Everything in the table was verified end-to-end against the real AI Studio
+28 models are registered; 25 are callable end-to-end (verified 2026-09-24 — see §15 of the
+notebook); the 3 blocked ones are marked above. Everything in the table was verified
+end-to-end against the real AI Studio
 runtime — captures, decoded protocol shapes and per-family notes live in
 `docs/protocol-notebook.md`.
 
@@ -138,19 +166,23 @@ Key reverse-engineered facts (all runtime-verified, details in the notebook):
 |---|---|---|
 | `AIS2A_PORT` | `8788` | API port |
 | `AIS2A_CDP_PORT` | `9333` | Chrome DevTools debug port |
-| `AIS2A_CDP_URL` | `http://127.0.0.1:9333` | Full CDP HTTP endpoint (overrides port) |
-| `AIS2A_CHROME_BIN` | auto | Path to Chrome/Chromium/Edge binary |
+| `AIS2A_CHROME_BIN` | auto-detected | Path to the Chrome/Chromium/Edge binary |
 | `AIS2A_PROFILE_DIR` | `~/.ais2api/chrome-profile` | Dedicated browser profile |
-| `AIS2A_DAILY_BUDGET` | `50` | Local per-day request ledger for paid-tier models |
+| `AIS2A_LOCK_WAIT` | `90` | Seconds a queued request waits for the browser |
+| `AIS2A_AGENT_TIMEOUT` | `1500` | Server-side timeout for agent models |
+| `AIS2A_TTS_TIMEOUT` | `120` | Server-side timeout for speech models |
+| `AIS2A_LIVE_TIMEOUT` | `120` | Server-side timeout for the Live voice model |
+| `AIS2A_VIDEO_TIMEOUT` | `600` | Server-side timeout for video jobs |
 
 ## Model registry & quota awareness
 
 `GET /v1/models` returns every supported model with `aistudio_tier`
-(`free` / `pro` / `premium` / `agent`), `protocol`, expected `media` types,
-and the attached model for agent wrappers. Free-tier models are always
-allowed; paid-tier ones decrement a local daily budget (a heuristic ledger —
-Google never exposes your real quota number; the server's own quota error
-frames are mapped to honest HTTP 429s either way).
+(`free` / `pro` / `premium` / `agent`), `protocol`, expected `media` types, and
+the attached model for agent wrappers. Free-tier models consume no paid quota;
+pro, premium and agent models use the quota of the signed-in account. There is
+**no local daily cap** — the server only counts requests per model per day, and
+Google's own limit is the real one: its internal quota frame is mapped to an
+honest HTTP 429 carrying Google's message.
 
 ## Fair use & disclaimer
 
