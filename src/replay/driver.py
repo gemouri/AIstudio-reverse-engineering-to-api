@@ -304,6 +304,27 @@ class Driver:
         if not self._ev("!!document.querySelector('textarea')"):
             raise CDPError("textarea never appeared after fresh-chat navigation (signed out?)")
 
+        # ---- IMAGE-HOST branch (24/09 audit fix): model sinh ảnh (lite-image
+        # và mọi image model) cần UI host = CHÍNH NÓ — payload genconfig image
+        # (p[3][3]=65536, p[3][14]=[2,1]) chỉ được tạo đúng khi host match.
+        # Swap từ host chat để thiếu field → server đọc MEDIUM → 400
+        # "Thinking level MEDIUM is not supported". Verified 24/09: host-trực-tiếp
+        # trả ảnh 480KB OK; mọi thinking-override đều không sửa được.
+        # => navigate ?model=<image-model>, KHÔNG swap p[0], HOOK không đụng p[3][16].
+        img_host = str(model or "")
+        self._image_host_mode = False
+        if "-image" in img_host and not img_host.endswith("-tts"):
+            self._image_host_mode = True
+            sep2 = "&" if "?" in nav_url else "?"
+            self._send("Page.navigate",
+                       {"url": f"{nav_url}{sep2}model={img_host.replace('models/', '', 1)}"})
+            deadline3 = time.time() + 20
+            while time.time() < deadline3:
+                time.sleep(1.5)
+                if self._ev("!!document.querySelector('textarea')"):
+                    break
+            if not self._ev("!!document.querySelector('textarea')"):
+                raise CDPError("image-host UI never loaded")
         # ---- paid-model unlock (12/09 FIX): URL model param, không DOM click ----
         # UI mới: ms-model-selector KHÔNG còn button.model-selector-card —
         # click-path cũ chết ("no-selector"). Sau test live, tab default về
@@ -314,7 +335,7 @@ class Driver:
           const b = [...document.querySelectorAll('button')]
             .find(b => /no api key/i.test(b.getAttribute('aria-label')||'') && b.offsetParent);
           return !!b;
-        })()"""):
+        })()""") and not getattr(self, "_image_host_mode", False):
             print("[driver] paid model locked UI (no API key) — re-nav with free model…", flush=True)
             sep = "&" if "?" in nav_url else "?"
             self._send("Page.navigate", {"url": f"{nav_url}{sep}model=gemini-3.1-flash-lite"})
@@ -340,7 +361,10 @@ class Driver:
             if want in TH_LEVELS:
                 thinking_cfg = [1, None, None, TH_LEVELS[want]]
             # "off"/"none"/"default" → None → HOOK default theo target model
-        swap = {"model": model, "temperature": temperature,
+        # IMAGE-HOST: do NOT swap model — UI host IS the target; leave payload
+        # intact (image genconfig p[3][16] must not be touched — MEDIUM 400).
+        swap_model = None if getattr(self, "_image_host_mode", False) else model
+        swap = {"model": swap_model, "temperature": temperature,
                 "tools": tools, "system": system, "contents": None,
                 "thinking_cfg": thinking_cfg}
         if history:

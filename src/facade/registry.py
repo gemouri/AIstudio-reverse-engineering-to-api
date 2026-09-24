@@ -104,7 +104,7 @@ REGISTRY: list[dict] = [
     {"id": "gemini-3.1-flash-lite-image", "model": "models/gemini-3.1-flash-lite-image",
      "protocol": "generate", "tier": "premium", "media": ["image", "text"],
      "thinking": None, "tabs": ["Gemini", "Images"],
-     "note": "lite variant — có thể free-rate; test 13/09"},
+     "note": "lite variant; 24/09 AUDIT FIX: must be driven as the UI host itself (?model=, no model swap) — see notebook §15"},
 
     # ---- premium tier: MUSIC (Lyria) ----
     {"id": "lyria-3.5", "model": "models/lyria-3.5",
@@ -119,13 +119,13 @@ REGISTRY: list[dict] = [
     {"id": "veo-3.1-generate", "model": "models/veo-3.1-generate-preview",
      "protocol": "longrunning", "tier": "premium", "media": ["video"],
      "thinking": None, "tabs": ["Video"],
-     "note": "paid tier per ListModels desc — predictLongRunning RPC"},
+     "note": "predictLongRunning RPC; 24/09 AUDIT: UPSTREAM-BLOCKED (op poll: entity not found — tier)"},
     {"id": "veo-3.1-fast-generate", "model": "models/veo-3.1-fast-generate-preview",
      "protocol": "longrunning", "tier": "premium", "media": ["video"],
-     "thinking": None, "tabs": ["Video"], "note": ""},
+     "thinking": None, "tabs": ["Video"], "note": "24/09 AUDIT: UPSTREAM-BLOCKED (op poll: entity not found — tier)"},
     {"id": "veo-3.1-lite-generate", "model": "models/veo-3.1-lite-generate-preview",
      "protocol": "longrunning", "tier": "premium", "media": ["video"],
-     "thinking": None, "tabs": ["Video"], "note": ""},
+     "thinking": None, "tabs": ["Video"], "note": "24/09 AUDIT: UPSTREAM-BLOCKED (op poll: entity not found — tier)"},
 
     # ---- interaction tier (omni) ----
     {"id": "gemini-omni-1.1-flash", "model": "models/gemini-omni-1.1-flash",
@@ -155,7 +155,7 @@ REGISTRY: list[dict] = [
      "thinking": None, "tabs": ["Agents"],
      "attached": "models/gemini-3.8-flash",
      "ui_model": "antigravity-preview-05-2026",
-     "note": "slot[78]=[null,null,1,1,1,'models/gemini-3.8-flash'] — managed agent wrapper"},
+     "note": "slot[78]=[null,null,1,1,1,gemini-3.8-flash — managed wrapper; 24/09 AUDIT: UPSTREAM-LOCKED (UI requires its own API key; navigating its UI also crashes the farmer)"},
 
     # ---- live tier (bidiGenerateContent WebChannel) ----
     {"id": "gemini-3.1-flash-live", "model": "models/gemini-3.1-flash-live-preview",

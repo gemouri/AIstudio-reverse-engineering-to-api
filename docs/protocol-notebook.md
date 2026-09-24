@@ -416,3 +416,18 @@ UI traps (runtime-verified):
 2. Example composers pre-bake 3 speech blocks — delete blocks 2..N (last first) or the leftover text ships in `contents` (23.7s audio instead of 3.6s).
 3. Run button has empty aria-label — match on textContent.
 4. `__tswap` must be set AFTER navigation (the hook re-arms and resets window vars on every new document).
+
+
+## 15. Model audit 24/09 — full E2E sweep of all 28 models
+
+Serial sweep through the facade (one request per model, family-appropriate prompts).
+
+| Result | Models |
+|---|---|
+| **22/28 PASS** (runtime-verified) | 5 free chat · 7 pro chat · 2 image (after fix) · 2 lyria · 2 TTS · 2 omni · 2 deep-research · 1 live |
+| **lite-image 400 → FIXED** | image genconfig is only correct when the **UI host is the image model itself** (`?model=` + NO p[0] swap + do NOT touch p[3][16]). Swapping from a chat host drops image-specific fields (`p[3][3]=65536`, `p[3][14]=[2,1]`) → server reads MEDIUM → 400. No thinking-override fixes this — the correct layer is the image-host branch in generate(). |
+| **pro-image "empty" → PASS** | The sweep error was a too-plain prompt ("red circle") — the model returned reasoning only. Retry with a fuller prompt: 200 + 2 JPEGs. Not a bug. |
+| **antigravity 502 → UPSTREAM-LOCKED** | Its UI now shows "Link an API key to unlock Antigravity Agent Previe…" — the model requires its own API key; a Pro web session no longer unlocks it. Also: loading its UI **crashes the whole farmer Chrome** — restart the farmer after touching it. |
+| **veo ×3 → UPSTREAM-BLOCKED** | CreateVideo fires, but the operation poll returns `[5,"Requested entity was not found"]` — models exist in ListModels but Google blocks them at this tier (0/4 on 09-13, 0/2 on 09-24 — consistent). |
+
+Latency (median): generate 22s · interaction 79s · speech 44s · live 80s.
