@@ -46,6 +46,7 @@ HOOK = r"""
   window.__swap = {model: null, temperature: null, tools: null, system: null, contents: null};
   window.__iswap = {model: null};
   window.__vswap = {model: null};
+  window.__tswap = {voice: null, style: null};
   const PATCH = (bodyStr, url) => {
     try {
       // Interactions API (omni/deep-research): model ở p[3][17][0] (12/09 verified)
@@ -64,6 +65,12 @@ HOOK = r"""
       }
       if (!/GenerateContent|GenerateTitle/.test(url)) return bodyStr;
       const p = JSON.parse(bodyStr);
+      // TTS voice config: /generate-speech UI places voice at p[3][15]
+      // (= [[["Fola"]]]); p[3][14]=[3] is a different field — do NOT touch.
+      const tsw = window.__tswap || {};
+      if (Array.isArray(p) && Array.isArray(p[3]) && tsw.voice) {
+        p[3][15] = [[[tsw.voice]]];
+      }
       const sw = window.__swap || {};
       if (sw.model) p[0] = sw.model;
       if (sw.temperature != null && p[3]) p[3][5] = sw.temperature;
@@ -103,6 +110,13 @@ HOOK = r"""
   };
 })()
 """
+
+
+
+def _payload_has_text(post_data: str, text: str) -> bool:
+    """True if the request body contains our text (skip noise requests)."""
+    return text in (post_data or "")
+
 
 
 class CDPError(RuntimeError):
@@ -930,6 +944,152 @@ class Driver:
         urls = re.findall(r'https://[A-Za-z0-9.-]*googleusercontent\.com/[^\s"\\]+', full)
         return {"video_b64": video_b64, "video_url": urls[0] if urls else None,
                 "request_count": len(rpcs), "ours": True, "raw": full[:100000]}
+
+
+    # ------------------------------------------------------------------
+    # 24/09: TTS (GenerateContent + speech config p[3][14], UI /generate-speech).
+    # Corpus cap_tts_ui_run2.json: request [model, contents, p3(genconfig+
+    # voice p[3][15]), waa]; response = N parts audio/l16;rate=24000;channels=1.
+    # Voice list: slot[66] ListModels. UI: example composer hoặc Add block.
+    # ------------------------------------------------------------------
+    def generate_speech(self, text: str, model: str, voice: str | None = None,
+                        style: str | None = None, timeout_s: int = 120) -> dict:
+        self._connect()
+        self._ensure_hook()
+
+        # UI riêng của TTS: /generate-speech (không phải /prompts/new_chat)
+        base = aistudio_url_for(getattr(self, "_page_url", None))
+        surl = base.replace("/prompts/new_chat", "/generate-speech")
+        sep = "&" if "?" in surl else "?"
+        self._send("Page.navigate",
+                   {"url": f"{surl}{sep}model={model.replace('models/', '', 1)}"})
+
+        # đợi composer: textarea xuất hiện sau khi chọn example/model
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            time.sleep(2)
+            if self._ev("!!document.querySelector('textarea')"):
+                break
+        if not self._ev("!!document.querySelector('textarea')"):
+            # trang landing: click example đầu để mở composer
+            self._ev("""(() => {
+              const h = [...document.querySelectorAll('h3')].find(
+                x => x.textContent.includes('Everyday Assistant'));
+              if (h) { const c = h.closest('div[class]'); if (c) c.click(); }
+            })()""")
+            time.sleep(4)
+            if not self._ev("!!document.querySelector('textarea')"):
+                raise CDPError("speech composer never appeared")
+
+        # composer example có 3 block pre-baked → XÓA block 2..N (bẫy 24/09:
+        # text sót trong block kia bị đưa vào contents → audio dài 23s thay vì
+        # ~4s). Xóa từ block CUỐI về block 1.
+        nblocks = int(self._ev("document.querySelectorAll('textarea').length") or 1)
+        if nblocks > 1:
+            for _ in range(nblocks - 1):
+                self._ev("""(() => {
+                  const tas = [...document.querySelectorAll('textarea')];
+                  if (tas.length < 2) return 'done';
+                  const ta = tas[tas.length - 1];
+                  const blk = ta.closest('div');
+                  let node = blk, del = null, hops = 0;
+                  while (node && hops < 6 && !del) {
+                    del = [...node.querySelectorAll('button')].find(b =>
+                      /delete speech block/i.test(b.getAttribute('aria-label')||''));
+                    node = node.parentElement; hops++;
+                  }
+                  if (del) { del.click(); return 'deleted'; }
+                  return 'no-del';
+                })()""")
+                time.sleep(1)
+            left = int(self._ev("document.querySelectorAll('textarea').length") or 0)
+            if left != 1:
+                # fallback: clear text mọi block thừa
+                self._ev("""(() => {
+                  const tas = [...document.querySelectorAll('textarea')];
+                  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+                  tas.forEach((ta, i) => { if (i > 0) { setter.call(ta, ''); ta.dispatchEvent(new Event('input', {bubbles: true})); } });
+                })()""")
+
+        # type text của ta vào block[0]
+        msg = json.dumps(text)
+        self._ev(f"""(async () => {{
+          const ta = document.querySelector('textarea');
+          if (!ta) return 'no-input';
+          ta.focus();
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          setter.call(ta, {msg});
+          ta.dispatchEvent(new Event('input', {{bubbles: true}}));
+          await new Promise(r => setTimeout(r, 800));
+          return 'typed';
+        }})()""")
+
+        # voice + style: set window.__tswap cho HOOK (nếu thêm branch TTS)
+        if voice or style:
+            self._ev("window.__tswap = " + json.dumps({"voice": voice, "style": style}))
+
+        # capture network — GenerateContent từ speech UI
+        events = []
+        got_ours = False
+
+        def on_evt(r):
+            nonlocal got_ours
+            m, p = r.get("method", ""), r.get("params", {}) or {}
+            if m == "Network.requestWillBeSent":
+                u = p.get("request", {}).get("url", "")
+                pd = p["request"].get("data") or p["request"].get("postData") or ""
+                if "alkalimakersuite" in u and "GenerateContent" in u:
+                    if _payload_has_text(pd, text):
+                        events.append({"id": p["requestId"], "postData": pd, "done": False})
+                        got_ours = True
+            elif m == "Network.loadingFinished":
+                for e in events:
+                    if e["id"] == p.get("requestId"):
+                        e["done"] = True
+
+        self._on_event = on_evt
+        try:
+            # Run: nút textContent "Run" (aria-label rỗng — bẫy 24/09)
+            self._ev("""(() => {
+              const btns = [...document.querySelectorAll('button')];
+              const run = btns.find(b =>
+                ((b.getAttribute('aria-label')||'') + ' ' + (b.textContent||''))
+                  .trim().startsWith('Run') && !b.disabled);
+              if (run) run.click();
+            })()""")
+            deadline = time.time() + timeout_s
+            first_done = None
+            while time.time() < deadline:
+                self.ws.settimeout(3)
+                try:
+                    on_evt(json.loads(self.ws.recv()))
+                except websocket.WebSocketTimeoutException:
+                    pass
+                if events and all(e.get("done") for e in events):
+                    if first_done is None:
+                        first_done = time.time()
+                    if time.time() - first_done >= 5:
+                        break
+                    time.sleep(1)
+                else:
+                    first_done = None
+        finally:
+            self._on_event = lambda r: None
+            self.ws.settimeout(30)
+
+        if not events:
+            raise CDPError("no GenerateContent observed after Run (TTS)")
+
+        bodies = []
+        for e in events:
+            try:
+                r = self._send("Network.getResponseBody", {"requestId": e["id"]})
+                bodies.append(r.get("body") or "")
+            except Exception:
+                pass
+        raw = "\n".join(bodies)
+        return {"raw": raw[:2_000_000], "request_count": len(events),
+                "ours": True}
 
 
 if __name__ == "__main__":

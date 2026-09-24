@@ -6,6 +6,7 @@ NO rate caps (user directive). Thinking stream as reasoning_content.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -231,6 +232,53 @@ def chat_completions():
         meta = {"elapsed_s": round(time.time() - t0, 1), "protocol": "live",
                 "frames": out.get("frames"), "model_verified": entry["model"],
                 "quota_spend": ACTIVE.spend}
+        created = int(time.time())
+        return jsonify(
+            id=f"chatcmpl-aistudio{int(time.time()*1000)}", object="chat.completion",
+            created=created, model=model,
+            choices=[{"index": 0, "message": msg, "finish_reason": "stop"}],
+            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            aistudio_rev_meta=meta,
+        )
+
+    # ---- TTS branch (24/09 — GenerateContent + speech config, UI /generate-speech) ----
+    if entry["protocol"] == "speech":
+        last_user = next((m.get("content") or "" for m in reversed(messages)
+                          if m.get("role") == "user"), "Hello.")
+        if not isinstance(last_user, str):
+            last_user = " ".join(p.get("text", "") for p in last_user
+                                 if isinstance(p, dict)) or "Hello."
+        # voice override qua "voice": "..." trong body hoặc model alias suffix
+        voice = (payload.get("voice") or payload.get("modalities")
+                 or "").strip() or None
+        drv = Driver()
+        t0 = time.time()
+        try:
+            with farmer_pipeline(model):
+                out = drv.generate_speech(last_user, entry["model"], voice=voice,
+                                          timeout_s=int(os.environ.get("AIS2A_TTS_TIMEOUT", "120")))
+        except FarmerBusy as e:
+            return jsonify(error={"message": str(e), "type": "farmer_busy"}), 503
+        except CDPError as e:
+            return jsonify(error={"message": f"driver: {e}", "type": "server_error"}), 502
+        except Exception as e:
+            return jsonify(error={"message": f"driver error: {e}", "type": "server_error"}), 502
+
+        media = extract_media(out["raw"])
+        pcm_total = b""
+        for m in media:
+            if (m.get("mime") or "").startswith("audio/"):
+                pcm_total += base64.b64decode(m["b64"])
+        ACTIVE.record(model, cost=1, ok=bool(pcm_total))
+        if not pcm_total:
+            return jsonify(error={"message": "TTS returned no audio (schema drift?)",
+                                  "type": "server_error"}), 502
+        wav_b64 = _pcm_to_wav_b64(base64.b64encode(pcm_total).decode())
+        msg = {"role": "assistant",
+               "content": f"Speech generated ({len(pcm_total)/48000:.1f}s)."}
+        msg["media"] = [f"data:audio/wav;base64,{wav_b64}"]
+        meta = {"elapsed_s": round(time.time() - t0, 1), "protocol": "speech",
+                "audio_parts": len(media), "quota_spend": ACTIVE.spend}
         created = int(time.time())
         return jsonify(
             id=f"chatcmpl-aistudio{int(time.time()*1000)}", object="chat.completion",

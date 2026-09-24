@@ -398,3 +398,21 @@ screenshots `docs/screenshots/deep-research-max-*.png`.
   `message.media`.
 - Driver unlock fix: paid-model lock sau test live → re-nav `?model=gemini-
   3.1-flash-lite` (URL param, không DOM click — click-path chết ở UI mới).
+
+
+### 14.9 TTS — gemini-3.8-flash-tts / -lite-tts (24/09 — REVERSED, runtime-verified)
+
+Both models use the same **GenerateContent RPC** (no new endpoint) but a separate UI at `/generate-speech`.
+
+- Voices (70, shared by both models): ListModels slot[66] — Lumi, Bodi, …, Puck, Zephyr (en-US).
+- Request: `p[0]` = model, `p[1]` = contents (one user turn per speech block), genconfig `p[3]`: `[4]=1, [5]=0.95, [6]=64`, **voice at `p[3][15] = [[["Fola"]]]`** (note: `p[3][14]=[3]` is a different field — do NOT overwrite), `p[4]` = waa token.
+- Response: N parts `[null,null,["audio/l16; rate=24000; channels=1","<b64>"]]` — 16-bit LE mono 24 kHz PCM in 1920–5760-byte chunks; seconds = total_bytes / 48000.
+- Driver: `Driver.generate_speech(text, model, voice, style, timeout_s)`.
+- Facade: protocol `speech`; optional `"voice": "Puck"` in the request body → HOOK rewrites `p[3][15]` → `message.media = ["data:audio/wav;base64,…"]`.
+- E2E verified 24/09: both models + voice override (payload capture shows `p[3][15]=[[["Puck"]]]`).
+
+UI traps (runtime-verified):
+1. The `/generate-speech` landing page has no composer — click an example card first; "New chat" closes it again.
+2. Example composers pre-bake 3 speech blocks — delete blocks 2..N (last first) or the leftover text ships in `contents` (23.7s audio instead of 3.6s).
+3. Run button has empty aria-label — match on textContent.
+4. `__tswap` must be set AFTER navigation (the hook re-arms and resets window vars on every new document).

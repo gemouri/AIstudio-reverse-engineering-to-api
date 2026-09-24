@@ -23,6 +23,7 @@ Chrome DevTools Protocol (CDP), then re-exposes everything as a standard
 | Streaming (SSE) | ✅ working | token-by-token `chat.completion.chunk` |
 | **Image generation** | ✅ working | `gemini-3-pro-image` (Nano Banana Pro), `gemini-3.1-flash-image` — images returned as data-URIs in `message.media` |
 | **Music generation** (Lyria) | ✅ working | `lyria-3.5`, `lyria-3-pro` — MP3 in `message.media` |
+| **Text-to-speech** (TTS) | ✅ working | `gemini-3.8-flash-tts`, `gemini-3.8-flash-lite-tts` — WAV in `message.media`; optional `"voice": "Puck"` in the request body (70 voices) |
 | **Deep Research agents** | ✅ working | full report + research plan + PNG artifacts + sources |
 | **Antigravity agent** | ✅ working | managed agent wrapper (attaches Gemini 3.8 Flash) |
 | **Omni models** | ✅ working | `gemini-omni-*` via the Interactions API |

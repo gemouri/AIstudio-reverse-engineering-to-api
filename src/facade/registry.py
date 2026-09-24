@@ -162,6 +162,17 @@ REGISTRY: list[dict] = [
      "protocol": "live", "tier": "premium", "media": ["audio", "text"],
      "thinking": None, "tabs": ["Live"],
      "note": "WebChannel long-poll; PCM 24kHz frames [[5,...]]; session qua Talk; copyright-agree ×4"},
+
+    # ---- speech tier (24/09 — TTS GenerateContent, UI /generate-speech) ----
+    {"id": "gemini-3.8-flash-tts", "model": "models/gemini-3.8-flash-tts",
+     "protocol": "speech", "tier": "premium", "media": ["audio"],
+     "thinking": None, "tabs": ["Audio"],
+     "note": "Flagship TTS Voice Design + dual-speaker; voice config p[3][15]=[[[voice]]]; PCM l16 24kHz mono"},
+    {"id": "gemini-3.8-flash-lite-tts", "model": "models/gemini-3.8-flash-lite-tts",
+     "protocol": "speech", "tier": "premium", "media": ["audio"],
+     "thinking": None, "tabs": ["Audio"],
+     "note": "High-speed TTS rapid dubbing; same protocol; voices slot[66] ListModels"},
+
 ]
 
 BY_ID = {m["id"]: m for m in REGISTRY}
@@ -255,7 +266,8 @@ def route(model_id: str) -> dict:
     call = {"generate": "generate",
             "interaction": "generate_interaction",
             "live": "live_session",
-            "longrunning": "longrunning"}[e["protocol"]]
+            "longrunning": "longrunning",
+            "speech": "generate_speech"}[e["protocol"]]
     return {"ok": True, "account": ACTIVE, "entry": e, "driver_call": call,
             "media_expected": e["media"]}
 
@@ -265,7 +277,7 @@ def catalog() -> list[dict]:
     now = int(time.time())
     out = []
     for m in REGISTRY:
-        wired = m["protocol"] in ("generate", "interaction")
+        wired = m["protocol"] in ("generate", "interaction", "speech")
         out.append({
             "id": m["id"], "object": "model", "created": now,
             "owned_by": "ais2api",
