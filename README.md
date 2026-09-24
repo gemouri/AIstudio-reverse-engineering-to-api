@@ -16,7 +16,7 @@ Chrome DevTools Protocol (CDP), then re-exposes everything as a standard
 
 | Capability | Status | Notes |
 |---|---|---|
-| Chat (text) | ✅ working | `generateContent` — 21 models incl. Gemini 3.x, Gemma |
+| **Chat (text)** | ✅ working | `generateContent` — 14 chat models (5 free incl. Gemma, 7 pro, 2 aliases) |
 | Thinking / reasoning stream | ✅ working | surfaced as `reasoning_content` (DeepSeek-style) |
 | Native function calling (tools) | ✅ working | OpenAI `tools` → Gemini proto, `tool_calls` back |
 | Multi-turn conversations | ✅ working | full transcript relayed per request |
@@ -25,10 +25,10 @@ Chrome DevTools Protocol (CDP), then re-exposes everything as a standard
 | **Music generation** (Lyria) | ✅ working | `lyria-3.5`, `lyria-3-pro` — MP3 in `message.media` |
 | **Text-to-speech** (TTS) | ✅ working | `gemini-3.8-flash-tts`, `gemini-3.8-flash-lite-tts` — WAV in `message.media`; optional `"voice": "Puck"` in the request body (70 voices) |
 | **Deep Research agents** | ✅ working | full report + research plan + PNG artifacts + sources |
-| **Antigravity agent** | ✅ working | managed agent wrapper (attaches Gemini 3.8 Flash) |
+| **Antigravity agent** | ⛔ upstream-locked (09-24) | its UI now requires linking an API key; a Pro web session no longer unlocks it |
 | **Omni models** | ✅ working | `gemini-omni-*` via the Interactions API |
-| Live API (voice) | 🔬 protocol reverse-engineered, not yet wired | WebChannel long-poll, PCM 24 kHz — see `docs/protocol-notebook.md` §14.6 |
-| Veo (video) | 🔬 protocol reverse-engineered, not yet wired | `GenerateVideo` + operation poll — see §14.2 |
+| **Live API (voice)** | ✅ working | `gemini-3.1-flash-live` — WebChannel long-poll, PCM 24 kHz → WAV in `message.media` (E2E 09-24) |
+| Veo (video) | ⛔ upstream-blocked (09-24) | `GenerateVideo` fires but the operation poll returns "entity not found" — blocked at Google's tier |
 
 Everything in the table was verified end-to-end against the real AI Studio
 runtime — captures, decoded protocol shapes and per-family notes live in

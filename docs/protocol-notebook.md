@@ -383,12 +383,12 @@ screenshots `docs/screenshots/deep-research-max-*.png`.
 
 ### 14.8 Model registry + smart quota (12/09 tối) — user request
 
-`src/facade/registry.py` = SSOT 26 models:
+`src/facade/registry.py` = SSOT 28 models (24/09 audit: 25 callable, 3 upstream-blocked — antigravity + veo×3):
 - **tier**: free (lite/gemma — cost 0) / pro (flash/pro — cost 1) / premium
   (image/music/video/live) / agent — 13/09: bỏ local cap 50/day (user
   directive); Google error frame [8] là limit duy nhất.
   (antigravity, deep-research — wrapper quanh attached model slot[78]).
-- **protocol**: generate | interaction | live | longrunning — route() trả
+- **protocol**: generate | interaction | live | longrunning | speech — route() trả
   driver call tương ứng; /v1/models giờ trả metadata tier/protocol/media.
 - **Quota** (13/09 update): Account class chỉ giữ per-model counters →
   `corpus/quota_ledger_u2.json` (thống kê, KHÔNG gate); hết quota → Google
